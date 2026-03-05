@@ -1,35 +1,20 @@
 
-# DNSRecon
+# DNSRecon Web
 
-DNSRecon is a DNS reconnaissance and security toolkit. Originally a Python port of a Ruby script for learning about DNS and security assessments, it has evolved into a full-featured web application with a React frontend, FastAPI backend, and Supabase-powered authentication and storage.
+A web application built on top of [DNSRecon](https://github.com/darkoperator/dnsrecon), the open-source DNS reconnaissance toolkit by darkoperator. This fork wraps the full power of DNSRecon's 13 scan types in a modern web interface with user accounts, saved scan history, and role-based access control.
 
-## Features
+The original CLI (`dnsrecon`) and REST API (`restdnsrecon`) remain fully functional and unchanged.
 
-### DNS Capabilities
+## What This Fork Adds
 
-- Check all NS Records for Zone Transfers
-- Enumerate General DNS Records for a given Domain (MX, SOA, NS, A, AAAA, SPF and TXT)
-- Perform common SRV Record Enumeration
-- Top Level Domain (TLD) Expansion
-- Check for Wildcard Resolution
-- Brute Force subdomain and host A and AAAA records given a domain and a wordlist
-- Perform a PTR Record lookup for a given IP Range or CIDR
-- Check a DNS Server Cached records for A, AAAA and CNAME Records provided a list of host records
-- BIND version detection, recursion checks, NXDOMAIN hijack detection
-- CAA record enumeration
-- DNSSEC zone walking
+- **React SPA frontend** with a dark-mode cybersecurity-themed UI
+- **Supabase backend** for authentication, PostgreSQL storage, and real-time scan updates
+- **Single-container deployment** on Fly.io (FastAPI serves both the API and the built frontend)
+- **User management** with an admin approval workflow — new signups are guests until an admin approves them
+- **Scan history and dashboard** — every scan is persisted with full results, filterable and searchable
+- **API key management** for programmatic access to the web API
 
-### Web Application
-
-- **Dashboard** with scan statistics and recent activity
-- **New Scan** wizard with 13 scan type options and per-type configuration
-- **Scan History** with status tracking, filtering, and pagination
-- **Real-time Results** via Supabase Realtime subscriptions
-- **User Management** with role-based access control (admin, approved, guest)
-- **API Key Management** for programmatic access
-- **Dark-mode-first UI** with a cybersecurity-themed design
-
-### Role System
+## Role System
 
 | Role | Access |
 |------|--------|
@@ -44,8 +29,8 @@ The first user to sign up on a fresh installation is automatically granted `admi
 ```
 Browser ──HTTPS──▶ Fly.io Container
                     ├── FastAPI Backend (Python)
-                    │   ├── DNS scan engine (dnspython)
-                    │   ├── JWT auth (ES256/HS256 via JWKS)
+                    │   ├── DNSRecon scan engine (dnspython)
+                    │   ├── JWT auth (ES256 via JWKS + HS256 fallback)
                     │   └── Supabase client (service role)
                     └── React SPA (static files)
                         ├── Supabase Auth (email/password)
@@ -74,7 +59,7 @@ uv sync
 
 Create a root `.env` for the backend:
 
-```bash
+```
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
@@ -83,7 +68,7 @@ SUPABASE_JWT_SECRET=your-jwt-secret
 
 Create `frontend/.env` for the frontend:
 
-```bash
+```
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key
 ```
@@ -92,8 +77,8 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
 
 Run the SQL files in `supabase/migrations/` against your Supabase project, in order:
 
-- `20260304000000_initial_schema.sql` — tables, RLS policies, trigger
-- `20260305000000_add_roles.sql` — role column, admin policies, auto-admin trigger
+1. `20260304000000_initial_schema.sql` — tables, RLS policies, new-user trigger
+2. `20260305000000_add_roles.sql` — role column, admin policies, auto-admin for first user
 
 ### 4. Install and build frontend
 
@@ -116,63 +101,50 @@ Visit `http://localhost:8080`. The first user to sign up becomes `admin`.
 
 The app ships as a single Docker container with a multi-stage build (Node for the frontend, Python for the backend).
 
-### 1. Create the Fly app
-
 ```bash
+# Create app
 fly launch --no-deploy
-```
 
-### 2. Set secrets
-
-```bash
+# Set secrets
 fly secrets set \
   SUPABASE_URL="https://your-project.supabase.co" \
   SUPABASE_ANON_KEY="your-anon-key" \
   SUPABASE_SERVICE_ROLE_KEY="your-service-role-key" \
   "SUPABASE_JWT_SECRET=your-jwt-secret"
-```
 
-### 3. Deploy
-
-```bash
+# Deploy
 fly deploy
 ```
 
-## CLI Usage
+## Using the Original CLI
 
-The original CLI and REST API remain fully functional:
+This fork preserves the upstream CLI and REST API. They work exactly as documented in the [upstream repository](https://github.com/darkoperator/dnsrecon):
 
 ```bash
 uv run dnsrecon -d example.com -t std
 uv run restdnsrecon
 ```
 
-See the [upstream documentation](https://github.com/darkoperator/dnsrecon) for full CLI options.
-
 ## Project Structure
 
 ```
-dnsrecon/
 ├── dnsrecon/
-│   ├── api.py                 # FastAPI app, SPA serving, CLI endpoints
+│   ├── api.py                 # FastAPI app — SPA serving + original endpoints
 │   ├── auth.py                # JWT verification (ES256 JWKS + HS256)
-│   ├── web_api.py             # Web API: scans, stats, admin, /api/me
+│   ├── web_api.py             # Web API: scans, stats, admin, user management
 │   ├── models.py              # Pydantic request/response models
 │   ├── supabase_client.py     # Supabase Python client wrapper
-│   └── cli.py                 # Original CLI + DNS scan logic
-├── frontend/
-│   ├── src/
-│   │   ├── pages/             # Login, Register, Dashboard, Scans, Admin, etc.
-│   │   ├── components/        # Nav, Layout, ProtectedRoute, UI primitives
-│   │   ├── hooks/             # useAuth, useScans
-│   │   └── lib/               # Supabase client, API helpers
-│   └── package.json
-├── supabase/
-│   └── migrations/            # SQL schema migrations
-├── Dockerfile                 # Multi-stage: Node build → Python runtime
-├── fly.toml                   # Fly.io configuration
+│   └── cli.py                 # Upstream CLI + DNS scan engine
+├── frontend/                  # React SPA (Vite + Tailwind + shadcn/ui)
+├── supabase/migrations/       # SQL schema migrations
+├── Dockerfile                 # Multi-stage build (Node → Python)
+├── fly.toml                   # Fly.io config
 └── pyproject.toml             # Python dependencies
 ```
+
+## Upstream
+
+DNSRecon was created by [Carlos Perez (darkoperator)](https://github.com/darkoperator/dnsrecon). This fork extends it with a web interface and does not modify the core DNS scanning logic.
 
 ## License
 
