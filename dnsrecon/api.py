@@ -1,9 +1,11 @@
 import os
 import traceback
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -97,6 +99,19 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*'],
 )
+
+# Include web API router (scan CRUD, auth, stats)
+try:
+    from dnsrecon.web_api import router as web_router
+
+    app.include_router(web_router)
+except Exception:
+    pass
+
+# Serve the React SPA frontend if the build directory exists
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / 'frontend' / 'dist'
+if _FRONTEND_DIR.is_dir():
+    app.mount('/assets', StaticFiles(directory=_FRONTEND_DIR / 'assets'), name='static-assets')
 
 
 @app.get('/', response_class=HTMLResponse)
@@ -1197,3 +1212,15 @@ async def nxdomain_hijack(
             },
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
+# SPA catch-all: serve index.html for any route not matched by the API.
+# Registered last so API routes take priority.
+if _FRONTEND_DIR.is_dir():
+
+    @app.get('/{full_path:path}', response_class=HTMLResponse, include_in_schema=False)
+    async def spa_catch_all(full_path: str) -> Response:
+        index = _FRONTEND_DIR / 'index.html'
+        if index.exists():
+            return HTMLResponse(index.read_text())
+        raise HTTPException(status_code=404, detail='Frontend not built')
