@@ -35,6 +35,7 @@ async def get_config() -> SupabaseConfigResponse:
     return SupabaseConfigResponse(url=get_supabase_url(), anon_key=get_supabase_anon_key())
 
 
+
 @router.get('/me')
 async def get_me(
     user: Annotated[dict, Depends(get_current_user_with_profile)],

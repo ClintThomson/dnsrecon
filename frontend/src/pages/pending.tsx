@@ -1,10 +1,27 @@
+import { useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Globe, LogOut, ShieldAlert } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useAuth } from '@/hooks/use-auth'
+import { supabase } from '@/lib/supabase'
 
 export default function PendingPage() {
-  const { user, signOut } = useAuth()
+  const { user, isApproved, loading } = useAuth()
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    if (!loading && isApproved) {
+      navigate('/', { replace: true })
+    }
+  }, [loading, isApproved, navigate])
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut()
+    navigate('/login', { replace: true })
+  }
+
+  if (loading || isApproved) return null
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-background px-4">
@@ -33,7 +50,7 @@ export default function PendingPage() {
               Signed in as <span className="font-medium text-foreground">{user?.email}</span>
             </p>
             <p className="text-sm text-muted-foreground">You&apos;ll be able to access the dashboard once an admin approves your account.</p>
-            <Button variant="outline" onClick={signOut} className="mt-2 gap-2">
+            <Button variant="outline" onClick={handleSignOut} className="mt-2 gap-2">
               <LogOut className="h-4 w-4" />
               Sign Out
             </Button>

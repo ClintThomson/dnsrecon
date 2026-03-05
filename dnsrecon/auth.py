@@ -4,10 +4,22 @@ from typing import Annotated
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt import PyJWKClient
 
 from dnsrecon.supabase_client import get_supabase_client
 
 security = HTTPBearer(auto_error=False)
+
+_jwks_client: PyJWKClient | None = None
+
+
+def _get_jwks_client() -> PyJWKClient:
+    global _jwks_client
+    if _jwks_client is None:
+        supabase_url = os.environ['SUPABASE_URL'].rstrip('/')
+        jwks_url = f'{supabase_url}/auth/v1/.well-known/jwks.json'
+        _jwks_client = PyJWKClient(jwks_url, cache_keys=True)
+    return _jwks_client
 
 
 def _get_jwt_secret() -> str:
@@ -24,13 +36,28 @@ async def get_current_user(
             detail='Missing authentication token',
         )
 
+    token = credentials.credentials
+
     try:
-        payload = jwt.decode(
-            credentials.credentials,
-            _get_jwt_secret(),
-            algorithms=['HS256'],
-            audience='authenticated',
-        )
+        header = jwt.get_unverified_header(token)
+        alg = header.get('alg', 'HS256')
+
+        if alg == 'ES256':
+            signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
+            payload = jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=['ES256'],
+                options={'verify_aud': False},
+            )
+        else:
+            payload = jwt.decode(
+                token,
+                _get_jwt_secret(),
+                algorithms=['HS256'],
+                options={'verify_aud': False},
+            )
+
         user_id = payload.get('sub')
         if user_id is None:
             raise HTTPException(
