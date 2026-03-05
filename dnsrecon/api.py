@@ -114,59 +114,58 @@ if _FRONTEND_DIR.is_dir():
     app.mount('/assets', StaticFiles(directory=_FRONTEND_DIR / 'assets'), name='static-assets')
 
 
+_API_LANDING_HTML = """
+<!DOCTYPE html>
+<html lang="en-US">
+    <head>
+        <title>DNSRecon API</title>
+         <style>
+          .header {
+            text-align: center;
+            display: block;
+            font-family: Arial, sans-serif;
+            margin: 50px 0;
+          }
+          .api-links {
+            text-align: center;
+            margin-top: 20px;
+            font-family: Arial, sans-serif;
+          }
+          .api-links a {
+            margin: 0 10px;
+            text-decoration: none;
+            color: #0366d6;
+          }
+          .api-links a:hover {
+            text-decoration: underline;
+          }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>DNSRecon REST API</h1>
+        </div>
+        <div class="api-links">
+            <a href="/docs">API Documentation</a> | 
+            <a href="/redoc">ReDoc Documentation</a> | 
+            <a href="/capabilities">API Capabilities</a>
+        </div>
+    </body>
+</html>
+"""
+
+
 @app.get('/', response_class=HTMLResponse)
 async def root(*, user_agent: str = Header(None)) -> Response:
-    """
-    Root endpoint that displays the DNSRecon logo and links to the API documentation.
-
-    Also performs basic user agent filtering to redirect suspicious bots.
-    """
-    # Basic user agent filtering
+    """Serve the SPA if built, otherwise show the API landing page."""
     if user_agent and ('gobuster' in user_agent or 'sqlmap' in user_agent or 'rustbuster' in user_agent):
-        response = RedirectResponse(app.url_path_for('bot'))
-        return response
+        return RedirectResponse(app.url_path_for('bot'))
 
-    return HTMLResponse(
-        """
-    <!DOCTYPE html>
-    <html lang="en-US">
-        <head>
-            <title>DNSRecon API</title>
-             <style>
-              .header {
-                text-align: center;
-                display: block;
-                font-family: Arial, sans-serif;
-                margin: 50px 0;
-              }
-              .api-links {
-                text-align: center;
-                margin-top: 20px;
-                font-family: Arial, sans-serif;
-              }
-              .api-links a {
-                margin: 0 10px;
-                text-decoration: none;
-                color: #0366d6;
-              }
-              .api-links a:hover {
-                text-decoration: underline;
-              }
-            </style>
-        </head>
-        <body>
-            <div class="header">
-                <h1>DNSRecon REST API</h1>
-            </div>
-            <div class="api-links">
-                <a href="/docs">API Documentation</a> | 
-                <a href="/redoc">ReDoc Documentation</a> | 
-                <a href="/capabilities">API Capabilities</a>
-            </div>
-        </body>
-    </html>
-    """
-    )
+    index = _FRONTEND_DIR / 'index.html'
+    if index.exists():
+        return HTMLResponse(index.read_text())
+
+    return HTMLResponse(_API_LANDING_HTML)
 
 
 class BotResponse(BaseModel):
