@@ -11,6 +11,8 @@ The original CLI (`dnsrecon`) and REST API (`restdnsrecon`) remain fully functio
 - **Supabase backend** for authentication, PostgreSQL storage, and real-time scan updates
 - **Single-container deployment** on Fly.io (FastAPI serves both the API and the built frontend)
 - **User management** with an admin approval workflow — new signups are guests until an admin approves them
+- **Live scan progress** — results stream into the UI as they're discovered (every 3 seconds), not after the scan finishes
+- **Scan cancellation** — cancel long-running scans from the UI; partial results are preserved
 - **Scan history and dashboard** — every scan is persisted with full results, filterable and searchable
 - **API key management** for programmatic access to the web API
 
@@ -21,6 +23,13 @@ The original CLI (`dnsrecon`) and REST API (`restdnsrecon`) remain fully functio
 | **guest** | Default for new signups. Sees a "pending approval" page only. |
 | **approved** | Full access to scans, history, settings, and API keys. |
 | **admin** | Everything above plus user management (approve, promote, demote, delete). |
+
+## Scan Features
+
+- **13 scan types** inherited from upstream DNSRecon (general enum, brute domain, brute reverse, SRV brute, TLD brute, zone walk, zone transfer, wildcard check, CAA records, cache snoop, BIND version, recursion check, NXDOMAIN hijack)
+- **Incremental results** — records are flushed to the database every 3 seconds during a scan and appear live in the UI via polling
+- **Progress indicator** — a live record count updates as the scan runs
+- **Cancel** — running scans can be cancelled from the scan detail page; partial results are kept with a `cancelled` status
 
 The first user to sign up on a fresh installation is automatically granted `admin`.
 
@@ -79,6 +88,7 @@ Run the SQL files in `supabase/migrations/` against your Supabase project, in or
 
 1. `20260304000000_initial_schema.sql` — tables, RLS policies, new-user trigger
 2. `20260305000000_add_roles.sql` — role column, admin policies, auto-admin for first user
+3. `20260305100000_add_scan_progress.sql` — progress tracking column, `cancelled` scan status
 
 ### 4. Install and build frontend
 
