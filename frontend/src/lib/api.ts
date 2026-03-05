@@ -67,6 +67,14 @@ export interface ApiKeyCreated extends ApiKey {
   key: string
 }
 
+export interface UserProfile {
+  id: string
+  email: string
+  role: 'admin' | 'approved' | 'guest'
+  display_name: string | null
+  created_at: string
+}
+
 export const api = {
   createScan: (data: { domain: string; scan_type: string; options?: Record<string, unknown> }) =>
     request<Scan>('/scans', { method: 'POST', body: JSON.stringify(data) }),
@@ -86,4 +94,12 @@ export const api = {
   listApiKeys: () => request<ApiKey[]>('/api-keys'),
 
   deleteApiKey: (id: string) => request<void>(`/api-keys/${id}`, { method: 'DELETE' }),
+
+  // Admin endpoints
+  listUsers: () => request<UserProfile[]>('/admin/users'),
+
+  updateUserRole: (userId: string, role: string) =>
+    request<UserProfile>(`/admin/users/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+
+  deleteUser: (userId: string) => request<void>(`/admin/users/${userId}`, { method: 'DELETE' }),
 }

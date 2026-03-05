@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from loguru import logger
 
-from dnsrecon.auth import get_current_user
+from dnsrecon.auth import get_admin_user, get_approved_user, get_current_user_with_profile
 from dnsrecon.models import (
     ApiKeyCreate,
     ApiKeyCreatedResponse,
@@ -35,11 +35,24 @@ async def get_config() -> SupabaseConfigResponse:
     return SupabaseConfigResponse(url=get_supabase_url(), anon_key=get_supabase_anon_key())
 
 
+@router.get('/me')
+async def get_me(
+    user: Annotated[dict, Depends(get_current_user_with_profile)],
+) -> dict:
+    """Return the current user's profile including role."""
+    return {
+        'id': user['id'],
+        'email': user.get('email'),
+        'role': user['profile_role'],
+        'display_name': user.get('display_name'),
+    }
+
+
 @router.post('/scans', response_model=ScanResponse, status_code=status.HTTP_201_CREATED)
 async def create_scan(
     body: ScanCreate,
     background_tasks: BackgroundTasks,
-    user: Annotated[dict, Depends(get_current_user)],
+    user: Annotated[dict, Depends(get_approved_user)],
 ) -> ScanResponse:
     """Create a new scan and start it as a background task."""
     client = get_supabase_client()
@@ -61,7 +74,7 @@ async def create_scan(
 
 @router.get('/scans', response_model=ScanListResponse)
 async def list_scans(
-    user: Annotated[dict, Depends(get_current_user)],
+    user: Annotated[dict, Depends(get_approved_user)],
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     scan_status: ScanStatus | None = None,
@@ -83,7 +96,7 @@ async def list_scans(
 @router.get('/scans/{scan_id}', response_model=ScanDetailResponse)
 async def get_scan(
     scan_id: str,
-    user: Annotated[dict, Depends(get_current_user)],
+    user: Annotated[dict, Depends(get_approved_user)],
 ) -> ScanDetailResponse:
     """Get a single scan with all its results."""
     client = get_supabase_client()
@@ -103,7 +116,7 @@ async def get_scan(
 @router.delete('/scans/{scan_id}', status_code=status.HTTP_204_NO_CONTENT)
 async def delete_scan(
     scan_id: str,
-    user: Annotated[dict, Depends(get_current_user)],
+    user: Annotated[dict, Depends(get_approved_user)],
 ) -> None:
     """Delete a scan and its results (cascade)."""
     client = get_supabase_client()
@@ -117,7 +130,7 @@ async def delete_scan(
 
 @router.get('/stats', response_model=StatsResponse)
 async def get_stats(
-    user: Annotated[dict, Depends(get_current_user)],
+    user: Annotated[dict, Depends(get_approved_user)],
 ) -> StatsResponse:
     """Return aggregate statistics for the authenticated user."""
     client = get_supabase_client()
@@ -149,7 +162,7 @@ async def get_stats(
 @router.post('/api-keys', response_model=ApiKeyCreatedResponse, status_code=status.HTTP_201_CREATED)
 async def create_api_key(
     body: ApiKeyCreate,
-    user: Annotated[dict, Depends(get_current_user)],
+    user: Annotated[dict, Depends(get_approved_user)],
 ) -> ApiKeyCreatedResponse:
     """Generate a new API key. The raw key is only shown once."""
     client = get_supabase_client()
@@ -168,7 +181,7 @@ async def create_api_key(
 
 @router.get('/api-keys', response_model=list[ApiKeyResponse])
 async def list_api_keys(
-    user: Annotated[dict, Depends(get_current_user)],
+    user: Annotated[dict, Depends(get_approved_user)],
 ) -> list[ApiKeyResponse]:
     client = get_supabase_client()
     result = client.table('api_keys').select('*').eq('user_id', user['id']).order('created_at', desc=True).execute()
@@ -178,13 +191,68 @@ async def list_api_keys(
 @router.delete('/api-keys/{key_id}', status_code=status.HTTP_204_NO_CONTENT)
 async def delete_api_key(
     key_id: str,
-    user: Annotated[dict, Depends(get_current_user)],
+    user: Annotated[dict, Depends(get_approved_user)],
 ) -> None:
     client = get_supabase_client()
     result = client.table('api_keys').select('id').eq('id', key_id).eq('user_id', user['id']).execute()
     if not result.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='API key not found')
     client.table('api_keys').delete().eq('id', key_id).execute()
+
+
+# --- Admin User Management ---
+
+
+@router.get('/admin/users', tags=['admin'])
+async def list_users(
+    user: Annotated[dict, Depends(get_admin_user)],
+) -> list[dict]:
+    """List all user profiles (admin only)."""
+    client = get_supabase_client()
+    result = client.table('profiles').select('*').order('created_at', desc=True).execute()
+    users_data = result.data or []
+
+    auth_users = client.auth.admin.list_users()
+    email_map = {str(u.id): u.email for u in auth_users}
+
+    for profile in users_data:
+        profile['email'] = email_map.get(profile['id'], 'unknown')
+    return users_data
+
+
+@router.patch('/admin/users/{user_id}', tags=['admin'])
+async def update_user_role(
+    user_id: str,
+    body: dict,
+    user: Annotated[dict, Depends(get_admin_user)],
+) -> dict:
+    """Update a user's role (admin only)."""
+    new_role = body.get('role')
+    if new_role not in ('admin', 'approved', 'guest'):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid role')
+
+    client = get_supabase_client()
+    result = client.table('profiles').update({'role': new_role}).eq('id', user_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+    return result.data[0]
+
+
+@router.delete('/admin/users/{user_id}', status_code=status.HTTP_204_NO_CONTENT, tags=['admin'])
+async def delete_user(
+    user_id: str,
+    user: Annotated[dict, Depends(get_admin_user)],
+) -> None:
+    """Delete a user and their profile (admin only)."""
+    if user_id == user['id']:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Cannot delete yourself')
+
+    client = get_supabase_client()
+    client.table('profiles').delete().eq('id', user_id).execute()
+    try:
+        client.auth.admin.delete_user(user_id)
+    except Exception:
+        pass
 
 
 # --- Background scan runner ---
