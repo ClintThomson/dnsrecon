@@ -1,20 +1,22 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { formatDistanceToNow, format } from 'date-fns'
-import { ArrowLeft, Clock, Globe, Trash2 } from 'lucide-react'
+import { ArrowLeft, Clock, Globe, Trash2, XCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { StatusBadge } from '@/components/status-badge'
 import { RecordsTable } from '@/components/records-table'
-import { useScan, useDeleteScan } from '@/hooks/use-scans'
+import { useScan, useDeleteScan, useCancelScan } from '@/hooks/use-scans'
 
 export default function ScanResultsPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { data, isLoading, error } = useScan(id!)
   const deleteScan = useDeleteScan()
+  const cancelScan = useCancelScan()
 
   if (isLoading) {
     return (
@@ -39,12 +41,18 @@ export default function ScanResultsPage() {
 
   const { scan, results } = data
   const isActive = scan.status === 'pending' || scan.status === 'running'
+  const isCancelled = scan.status === 'cancelled'
   const recordTypes = [...new Set(results.map((r) => r.record_type))].sort()
 
   const handleDelete = async () => {
     if (!confirm('Delete this scan and all its results?')) return
     await deleteScan.mutateAsync(scan.id)
     navigate('/history')
+  }
+
+  const handleCancel = async () => {
+    if (!confirm('Cancel this running scan? Partial results will be saved.')) return
+    await cancelScan.mutateAsync(scan.id)
   }
 
   return (
@@ -66,10 +74,54 @@ export default function ScanResultsPage() {
             {formatDistanceToNow(new Date(scan.created_at), { addSuffix: true })}
           </p>
         </div>
-        <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleteScan.isPending}>
-          <Trash2 className="mr-1 h-4 w-4" /> Delete
-        </Button>
+        <div className="flex items-center gap-2">
+          {isActive && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCancel}
+              disabled={cancelScan.isPending}
+              className="border-yellow-600 text-yellow-500 hover:bg-yellow-600/10"
+            >
+              <XCircle className="mr-1 h-4 w-4" /> Cancel
+            </Button>
+          )}
+          <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleteScan.isPending}>
+            <Trash2 className="mr-1 h-4 w-4" /> Delete
+          </Button>
+        </div>
       </div>
+
+      {isActive && (
+        <Card className="border-primary/30">
+          <CardContent className="py-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 animate-pulse rounded-full bg-primary" />
+                <span className="text-sm font-medium">Scanning in progress</span>
+              </div>
+              <span className="text-sm text-muted-foreground">
+                {scan.progress != null ? `${scan.progress} records found` : 'Starting...'}
+              </span>
+            </div>
+            <Progress value={100} className="h-1.5 animate-pulse" />
+          </CardContent>
+        </Card>
+      )}
+
+      {isCancelled && (
+        <Card className="border-yellow-600/50">
+          <CardContent className="py-4">
+            <div className="flex items-center gap-2 text-yellow-500">
+              <XCircle className="h-4 w-4" />
+              <span className="text-sm font-medium">
+                Scan was cancelled
+                {scan.progress != null && scan.progress > 0 && ` — ${scan.progress} partial records saved`}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-3">
         <Card>
@@ -77,7 +129,9 @@ export default function ScanResultsPage() {
             <CardDescription>Records Found</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{results.length}</div>
+            <div className="text-2xl font-bold">
+              {isActive ? (scan.progress ?? 0) : results.length}
+            </div>
           </CardContent>
         </Card>
         <Card>
@@ -129,8 +183,11 @@ export default function ScanResultsPage() {
           <CardHeader>
             <CardTitle>Results</CardTitle>
             <CardDescription>
-              {results.length} records found &middot;{' '}
-              {scan.completed_at && format(new Date(scan.completed_at), 'PPpp')}
+              {results.length} records found
+              {isActive && ' so far'}
+              {scan.completed_at && !isActive && (
+                <> &middot; {format(new Date(scan.completed_at), 'PPpp')}</>
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent>

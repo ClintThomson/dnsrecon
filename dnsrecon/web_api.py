@@ -2,6 +2,8 @@ import asyncio
 import hashlib
 import os
 import secrets
+import threading
+import time
 import traceback
 from datetime import UTC, datetime
 from typing import Annotated
@@ -256,54 +258,151 @@ async def delete_user(
         pass
 
 
-# --- Background scan runner ---
+# --- Background scan runner with incremental streaming & cancellation ---
+
+_running_scans: dict[str, threading.Event] = {}
+
+
+class _CallbackList(list):
+    """A list subclass that calls a callback on every append."""
+
+    def __init__(self, callback):
+        super().__init__()
+        self._callback = callback
+
+    def append(self, item):
+        super().append(item)
+        self._callback(item)
+
+
+def _result_to_row(scan_id: str, result: dict) -> dict:
+    return {
+        'scan_id': scan_id,
+        'record_type': result.get('type', 'Unknown'),
+        'name': result.get('name', ''),
+        'address': result.get('address', ''),
+        'target': result.get('target'),
+        'port': result.get('port'),
+        'raw_data': result,
+    }
+
+
+def _flush_results(client, scan_id: str, queue: list, lock: threading.Lock, total_flushed: list[int]) -> None:
+    """Drain the shared queue, insert rows into Supabase, and update progress."""
+    with lock:
+        if not queue:
+            return
+        pending = list(queue)
+        queue.clear()
+
+    for i in range(0, len(pending), 50):
+        client.table('scan_results').insert(pending[i : i + 50]).execute()
+
+    total_flushed[0] += len(pending)
+    client.table('scans').update({'progress': total_flushed[0]}).eq('id', scan_id).execute()
+
+
+@router.post('/scans/{scan_id}/cancel', status_code=status.HTTP_200_OK)
+async def cancel_scan(
+    scan_id: str,
+    user: Annotated[dict, Depends(get_approved_user)],
+) -> dict:
+    """Cancel a running scan."""
+    client = get_supabase_client()
+    scan_result = client.table('scans').select('id, status').eq('id', scan_id).eq('user_id', user['id']).execute()
+    if not scan_result.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Scan not found')
+
+    if scan_result.data[0]['status'] not in ('pending', 'running'):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Scan is not running')
+
+    cancel_event = _running_scans.get(scan_id)
+    if cancel_event:
+        cancel_event.set()
+    else:
+        client.table('scans').update({
+            'status': ScanStatus.CANCELLED.value,
+            'completed_at': datetime.now(UTC).isoformat(),
+        }).eq('id', scan_id).execute()
+
+    return {'status': 'cancelling'}
 
 
 async def _run_scan(scan_id: str, scan_type: ScanType, domain: str, options: dict) -> None:
-    """Execute a DNS scan in a background thread and persist results to Supabase."""
+    """Execute a DNS scan in a background thread with incremental result flushing."""
     client = get_supabase_client()
+    cancel_event = threading.Event()
+    _running_scans[scan_id] = cancel_event
 
     client.table('scans').update({
         'status': ScanStatus.RUNNING.value,
         'started_at': datetime.now(UTC).isoformat(),
+        'progress': 0,
     }).eq('id', scan_id).execute()
 
+    result_queue: list[dict] = []
+    queue_lock = threading.Lock()
+    total_flushed: list[int] = [0]
+
+    def on_result(record: dict):
+        if isinstance(record, dict):
+            with queue_lock:
+                result_queue.append(_result_to_row(scan_id, record))
+
     try:
-        results = await asyncio.to_thread(_execute_scan, scan_type, domain, options)
+        results = await asyncio.to_thread(
+            _execute_scan_streaming, scan_id, scan_type, domain, options, on_result, cancel_event, client, result_queue, queue_lock, total_flushed,
+        )
 
-        if results:
-            batch = []
-            for result in results:
-                if isinstance(result, dict):
-                    batch.append({
-                        'scan_id': scan_id,
-                        'record_type': result.get('type', 'Unknown'),
-                        'name': result.get('name', ''),
-                        'address': result.get('address', ''),
-                        'target': result.get('target'),
-                        'port': result.get('port'),
-                        'raw_data': result,
-                    })
-            if batch:
-                for i in range(0, len(batch), 50):
-                    client.table('scan_results').insert(batch[i : i + 50]).execute()
+        _flush_results(client, scan_id, result_queue, queue_lock, total_flushed)
 
-        client.table('scans').update({
-            'status': ScanStatus.COMPLETED.value,
-            'completed_at': datetime.now(UTC).isoformat(),
-        }).eq('id', scan_id).execute()
+        if cancel_event.is_set():
+            client.table('scans').update({
+                'status': ScanStatus.CANCELLED.value,
+                'completed_at': datetime.now(UTC).isoformat(),
+                'progress': total_flushed[0],
+            }).eq('id', scan_id).execute()
+        else:
+            if results:
+                for r in results:
+                    if isinstance(r, dict):
+                        row = _result_to_row(scan_id, r)
+                        with queue_lock:
+                            result_queue.append(row)
+                _flush_results(client, scan_id, result_queue, queue_lock, total_flushed)
+
+            client.table('scans').update({
+                'status': ScanStatus.COMPLETED.value,
+                'completed_at': datetime.now(UTC).isoformat(),
+                'progress': total_flushed[0],
+            }).eq('id', scan_id).execute()
 
     except Exception as e:
         logger.error(f'Scan {scan_id} failed: {e}\n{traceback.format_exc()}')
+        _flush_results(client, scan_id, result_queue, queue_lock, total_flushed)
         client.table('scans').update({
             'status': ScanStatus.FAILED.value,
             'completed_at': datetime.now(UTC).isoformat(),
             'error_message': str(e),
+            'progress': total_flushed[0],
         }).eq('id', scan_id).execute()
+    finally:
+        _running_scans.pop(scan_id, None)
 
 
-def _execute_scan(scan_type: ScanType, domain: str, options: dict) -> list[dict] | None:
-    """Run the actual DNS operation synchronously (called via asyncio.to_thread)."""
+def _execute_scan_streaming(
+    scan_id: str,
+    scan_type: ScanType,
+    domain: str,
+    options: dict,
+    on_result,
+    cancel_event: threading.Event,
+    client,
+    result_queue: list,
+    queue_lock: threading.Lock,
+    total_flushed: list[int],
+) -> list[dict] | None:
+    """Run the DNS operation with periodic flushing and cancellation support."""
     from dnsrecon.cli import (
         brute_domain,
         brute_reverse,
@@ -323,10 +422,59 @@ def _execute_scan(scan_type: ScanType, domain: str, options: dict) -> list[dict]
     thread_num = options.get('thread_num', 10)
     timeout = options.get('timeout', 3)
 
+    flush_stop = threading.Event()
+
+    def flush_loop():
+        while not flush_stop.is_set():
+            time.sleep(3)
+            try:
+                _flush_results(client, scan_id, result_queue, queue_lock, total_flushed)
+            except Exception as exc:
+                logger.warning(f'Flush error for scan {scan_id}: {exc}')
+
+    flusher = threading.Thread(target=flush_loop, daemon=True)
+    flusher.start()
+
+    try:
+        return _do_scan(
+            scan_type, domain, options, on_result, cancel_event,
+            rd, thread_num, timeout,
+        )
+    finally:
+        flush_stop.set()
+        flusher.join(timeout=5)
+
+
+def _do_scan(
+    scan_type: ScanType,
+    domain: str,
+    options: dict,
+    on_result,
+    cancel_event: threading.Event,
+    rd: bool,
+    thread_num: int,
+    timeout: int,
+) -> list[dict] | None:
+    """Run the actual DNS operation. Long-running scans use _CallbackList for incremental results."""
+    from dnsrecon.cli import (
+        brute_domain,
+        brute_reverse,
+        brute_srv,
+        brute_tlds,
+        check_bindversion,
+        check_nxdomain_hijack,
+        check_recursive,
+        check_wildcard,
+        ds_zone_walk,
+        general_enum,
+        in_cache,
+    )
+    from dnsrecon.lib.dnshelper import DnsHelper
+
     match scan_type:
         case ScanType.GENERAL_ENUM:
             res = DnsHelper(domain, recursion_desired=rd)
-            return general_enum(
+            results = general_enum(
                 res=res,
                 domain=domain,
                 do_axfr=options.get('do_axfr', False),
@@ -342,11 +490,16 @@ def _execute_scan(scan_type: ScanType, domain: str, options: dict) -> list[dict]
                 request_timeout=timeout,
                 thread_num=thread_num,
             )
+            if results:
+                for r in results:
+                    on_result(r)
+            return None
 
         case ScanType.BRUTE_DOMAIN:
             res = DnsHelper(domain, recursion_desired=rd)
             wordlist = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'subdomains-top1mil-5000.txt')
-            return brute_domain(
+            cb_list = _CallbackList(on_result)
+            brute_domain(
                 res=res,
                 dictfile=wordlist,
                 dom=domain,
@@ -355,6 +508,9 @@ def _execute_scan(scan_type: ScanType, domain: str, options: dict) -> list[dict]
                 ignore_wildcard=not options.get('filter_wildcards', True),
                 thread_num=thread_num,
             )
+            if cancel_event.is_set():
+                return None
+            return None
 
         case ScanType.BRUTE_REVERSE:
             res = DnsHelper('example.com', recursion_desired=rd)
@@ -367,59 +523,95 @@ def _execute_scan(scan_type: ScanType, domain: str, options: dict) -> list[dict]
                 ]
             else:
                 ip_list = [ip_range]
-            return brute_reverse(res=res, ip_list=ip_list, verbose=False, thread_num=thread_num)
+            results = brute_reverse(res=res, ip_list=ip_list, verbose=False, thread_num=thread_num)
+            if results:
+                for r in results:
+                    on_result(r)
+            return None
 
         case ScanType.BRUTE_SRV:
             res = DnsHelper(domain, recursion_desired=rd)
-            return brute_srv(res=res, domain=domain, verbose=False, thread_num=thread_num)
+            results = brute_srv(res=res, domain=domain, verbose=False, thread_num=thread_num)
+            if results:
+                for r in results:
+                    on_result(r)
+            return None
 
         case ScanType.BRUTE_TLDS:
             res = DnsHelper(domain, recursion_desired=rd)
-            return brute_tlds(res=res, domain=domain, verbose=False, thread_num=thread_num)
+            results = brute_tlds(res=res, domain=domain, verbose=False, thread_num=thread_num)
+            if results:
+                for r in results:
+                    on_result(r)
+            return None
 
         case ScanType.ZONE_WALK:
             res = DnsHelper(domain)
-            return ds_zone_walk(res=res, domain=domain, request_timeout=timeout)
+            results = ds_zone_walk(res=res, domain=domain, request_timeout=timeout)
+            if results:
+                for r in results:
+                    on_result(r)
+            return None
 
         case ScanType.WILDCARD_CHECK:
             res = DnsHelper(domain)
             ips = check_wildcard(res, domain)
             if ips:
-                return [{'type': 'Wildcard', 'name': domain, 'address': ip} for ip in ips]
-            return [{'type': 'Wildcard', 'name': domain, 'address': 'No wildcard'}]
+                records = [{'type': 'Wildcard', 'name': domain, 'address': ip} for ip in ips]
+            else:
+                records = [{'type': 'Wildcard', 'name': domain, 'address': 'No wildcard'}]
+            for r in records:
+                on_result(r)
+            return None
 
         case ScanType.AXFR_TEST:
             res = DnsHelper(domain)
-            return res.zone_transfer()
+            results = res.zone_transfer()
+            if results:
+                for r in results:
+                    on_result(r)
+            return None
 
         case ScanType.CAA_RECORDS:
             res = DnsHelper(domain)
             raw = res.get_caa()
             if raw:
-                return [{'type': r[0], 'name': r[1], 'address': r[2]} for r in raw if len(r) >= 3]
-            return []
+                for r in raw:
+                    if len(r) >= 3:
+                        on_result({'type': r[0], 'name': r[1], 'address': r[2]})
+            return None
 
         case ScanType.CACHE_SNOOP:
             res = DnsHelper('example.com')
             ns = options.get('nameserver', domain)
             dict_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'namelist.txt')
-            return in_cache(res=res, dict_file=dict_file, ns=ns)
+            results = in_cache(res=res, dict_file=dict_file, ns=ns)
+            if results:
+                for r in results:
+                    on_result(r)
+            return None
 
         case ScanType.BIND_VERSION:
             res = DnsHelper('example.com')
             ns = options.get('nameserver', domain)
             version = check_bindversion(res=res, ns_server=ns, timeout=timeout)
-            return [{'type': 'BIND', 'name': ns, 'address': version or 'Not detected'}]
+            record = {'type': 'BIND', 'name': ns, 'address': version or 'Not detected'}
+            on_result(record)
+            return None
 
         case ScanType.RECURSIVE_CHECK:
             res = DnsHelper('example.com')
             ns = options.get('nameserver', domain)
             result = check_recursive(res=res, ns_server=ns, timeout=timeout)
-            return [{'type': 'Recursion', 'name': ns, 'address': result or 'Not enabled'}]
+            record = {'type': 'Recursion', 'name': ns, 'address': result or 'Not enabled'}
+            on_result(record)
+            return None
 
         case ScanType.NXDOMAIN_HIJACK:
             ns = options.get('nameserver', domain)
             result = check_nxdomain_hijack(nameserver=ns)
-            return [{'type': 'NXDOMAIN', 'name': ns, 'address': result or 'No hijacking detected'}]
+            record = {'type': 'NXDOMAIN', 'name': ns, 'address': result or 'No hijacking detected'}
+            on_result(record)
+            return None
 
     return None

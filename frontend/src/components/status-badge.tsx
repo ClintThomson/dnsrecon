@@ -5,6 +5,7 @@ const STATUS_MAP: Record<string, { label: string; variant: 'default' | 'secondar
   running: { label: 'Running', variant: 'warning' },
   completed: { label: 'Completed', variant: 'success' },
   failed: { label: 'Failed', variant: 'destructive' },
+  cancelled: { label: 'Cancelled', variant: 'warning' },
 }
 
 export function StatusBadge({ status }: { status: string }) {

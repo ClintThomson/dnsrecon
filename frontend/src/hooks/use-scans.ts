@@ -36,6 +36,17 @@ export function useDeleteScan() {
   })
 }
 
+export function useCancelScan() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: api.cancelScan,
+    onSuccess: (_data, scanId) => {
+      qc.invalidateQueries({ queryKey: ['scan', scanId] })
+      qc.invalidateQueries({ queryKey: ['scans'] })
+    },
+  })
+}
+
 export function useStats() {
   return useQuery({ queryKey: ['stats'], queryFn: api.getStats })
 }

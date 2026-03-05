@@ -25,6 +25,7 @@ class ScanStatus(str, Enum):
     RUNNING = 'running'
     COMPLETED = 'completed'
     FAILED = 'failed'
+    CANCELLED = 'cancelled'
 
 
 class ScanCreate(BaseModel):
@@ -41,6 +42,7 @@ class ScanResponse(BaseModel):
     status: ScanStatus
     options: dict
     created_at: datetime
+    progress: int | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None

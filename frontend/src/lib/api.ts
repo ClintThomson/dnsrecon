@@ -24,8 +24,9 @@ export interface Scan {
   user_id: string
   domain: string
   scan_type: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   options: Record<string, unknown>
+  progress: number | null
   created_at: string
   started_at: string | null
   completed_at: string | null
@@ -85,6 +86,8 @@ export const api = {
   getScan: (id: string) => request<ScanDetail>(`/scans/${id}`),
 
   deleteScan: (id: string) => request<void>(`/scans/${id}`, { method: 'DELETE' }),
+
+  cancelScan: (id: string) => request<{ status: string }>(`/scans/${id}/cancel`, { method: 'POST' }),
 
   getStats: () => request<Stats>('/stats'),
 
