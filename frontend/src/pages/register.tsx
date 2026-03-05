@@ -32,7 +32,7 @@ export default function RegisterPage() {
                 },
               },
             }}
-            providers={['github']}
+            providers={[]}
             view="sign_up"
             showLinks={false}
             redirectTo={`${window.location.origin}/`}
